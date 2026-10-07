@@ -76,7 +76,7 @@ func statusCode(code domain.ErrorCode) int {
 		domain.CodeLeaseNotClaimed,
 		domain.CodeConflict:
 		return http.StatusConflict
-	case domain.CodeNoProbes:
+	case domain.CodeNoProbes, domain.CodePolicyBlocked:
 		return http.StatusUnprocessableEntity
 	case domain.CodeStorageFailure, domain.CodeInternal:
 		return http.StatusInternalServerError

@@ -18,6 +18,7 @@ import (
 	"solo-0014-zone-rollout-control/internal/httpapi"
 	"solo-0014-zone-rollout-control/internal/plan"
 	"solo-0014-zone-rollout-control/internal/platform"
+	"solo-0014-zone-rollout-control/internal/policy"
 	"solo-0014-zone-rollout-control/internal/probe"
 	"solo-0014-zone-rollout-control/internal/store"
 )
@@ -49,7 +50,8 @@ func newHarness() (*harness, error) {
 	allocations := allocation.New(stateStore, clock, ids)
 	probes := probe.New(stateStore, clock, ids, allocations)
 	assessments := assessment.New(stateStore, clock, ids)
-	api := httpapi.New(plans, nodes, allocations, probes, assessments, ids, logger)
+	policies := policy.New(stateStore, clock, ids)
+	api := httpapi.New(plans, nodes, allocations, probes, assessments, policies, ids, logger)
 
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -106,8 +108,9 @@ func (h *harness) call(method string, path string, requestBody any, target any) 
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		var failure struct {
 			Error struct {
-				Code    string `json:"code"`
-				Message string `json:"message"`
+				Code    string         `json:"code"`
+				Message string         `json:"message"`
+				Details map[string]any `json:"details"`
 			} `json:"error"`
 		}
 		if err := json.Unmarshal(body, &failure); err != nil {
@@ -117,6 +120,7 @@ func (h *harness) call(method string, path string, requestBody any, target any) 
 			Status:  response.StatusCode,
 			Code:    failure.Error.Code,
 			Message: failure.Error.Message,
+			Details: failure.Error.Details,
 		}
 	}
 	if target == nil {

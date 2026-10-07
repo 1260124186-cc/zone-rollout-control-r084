@@ -19,6 +19,11 @@
       "responsibility": "plan lifecycle and immutable zone revision orchestration"
     },
     {
+      "id": "policy",
+      "path": "internal/policy",
+      "responsibility": "immutable versioned zone policy bundle management"
+    },
+    {
       "id": "fleet",
       "path": "internal/fleet",
       "responsibility": "resolver node enrollment, uniqueness checks, and paginated reads"
@@ -151,6 +156,27 @@
         "httpapi",
         "assessment",
         "probe",
+        "domain",
+        "storage"
+      ]
+    },
+    {
+      "id": "zone-policy-enforcement",
+      "name": "Zone policy enforcement",
+      "entry": "PUT /v1/policies -> POST /v1/plans/{id}/policy-check -> PATCH /v1/plans/{id}/revisions",
+      "steps": [
+        "create an immutable versioned policy bundle with rules, severities, zones, and exceptions",
+        "bind a plan to a pinned bundle version at creation",
+        "evaluate the same deterministic policy conclusion at precheck and at append",
+        "reject blocking content and store warning conclusions on the immutable revision"
+      ],
+      "success": "blocking findings never enter an immutable revision, warnings are stored with the revision, and upgrades never rewrite historical conclusions",
+      "failure": "invalid bundles, missing bundles, and blocked revisions return stable errors without partial state",
+      "verification": "workflowprobe zone-policy-enforcement covers rule overlap, exception expiry, precheck equality, truncation, upgrades, and unbound plans",
+      "module_ids": [
+        "httpapi",
+        "policy",
+        "plan",
         "domain",
         "storage"
       ]

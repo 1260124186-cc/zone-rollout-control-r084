@@ -27,6 +27,7 @@ Zone Rollout Control 是面向 DNS 运维人员的 Go HTTP 控制面。它把区
 - `version`：每次计划聚合变化后递增。
 - `latest_revision_id`：最近一次添加的区域版本。
 - `latest_assessment_id`：最近一次完成的一致性判定。
+- `policy_bundle_id`、`policy_bundle_version`：可选的策略包绑定，在创建时固定版本；留空表示不启用策略。
 - `created_at`、`activated_at`、`completed_at`：RFC3339 时间。
 
 ### ZoneRevision
@@ -36,6 +37,7 @@ Zone Rollout Control 是面向 DNS 运维人员的 Go HTTP 控制面。它把区
 - `id`、`plan_id`、`serial`、`authority`。
 - `entries`：区域条目数组，每项包含 `owner`、`type` 和 `value`。
 - `entry_count`：由服务计算，客户端不能覆盖。
+- `policy`：启用策略的计划在追加时保存的策略结论；未启用策略的版本没有此字段。
 - `created_at`。
 
 同一计划内的序列号必须严格递增。条目类型只接受 `A`、`AAAA` 和 `CNAME`。`A` 与 `AAAA` 的值必须是 IPv4 或 IPv6 地址，`CNAME` 的值必须是规范域名。
@@ -81,6 +83,29 @@ Zone Rollout Control 是面向 DNS 运维人员的 Go HTTP 控制面。它把区
 - `reasons`：稳定原因代码列表。
 - `probe_count`、`success_count`、`success_ratio`、`maximum_latency_ms`。
 - `created_at`。
+
+### PolicyBundle
+
+一份不可变的版本化区域策略包，把规则、严重度、适用区域和例外写入一个可管理实体。
+
+- `id`：服务生成的稳定标识。
+- `name`：策略包名称，小写字母、数字和连字符。
+- `version`：同名策略包从 1 开始单调递增，创建后不可变；升级即发布同名新版本，不回写历史版本。
+- `rules`：规则数组，每项包含 `code`（`apex_cname`、`cname_conflict`、`wildcard_shadow`）、`severity`（`block` 或 `warn`）和 `zones`（适用区域，空数组表示全部区域）。
+- `exceptions`：例外数组，每项包含 `id`、`rule_code`、`zone`、`owner`、`reason` 和 `expires_at`。
+- `created_at`。
+
+### PolicyConclusion
+
+对一份区域版本候选内容执行策略评估得到的确定性结论。版本预检和正式追加生成同一结论。
+
+- `bundle_id`、`bundle_version`：评估使用的策略包版本；未启用策略时为空。
+- `outcome`：`pass`、`warn` 或 `block`。
+- `findings`：按规则、所有者、类型、值稳定排序的命中项，每项带严重度、说明、是否被例外抑制及例外标识；最多保存 100 条。
+- `finding_counts`：按规则统计的生效命中数（不受截断影响）。
+- `rules_evaluated`、`entries_evaluated`、`truncated`、`suppressed_count`。
+- `expired_exception_ids`：命中但已过期而被忽略的例外标识。
+- `evaluated_at`。
 
 ## 4. 状态和规则
 
@@ -141,6 +166,17 @@ ready --lease--> leased --report--> ready
 - `serial_mismatch`
 - `success_ratio_below_minimum`
 - `latency_limit_exceeded`
+
+### 区域策略包
+
+- 策略包在创建时即不可变，同名再创建得到下一个版本；计划在创建时绑定具体的 `policy_bundle_id` 并固定其版本，升级策略包不会改写历史版本上已保存的结论。
+- 内置规则代码：`apex_cname`（顶点 CNAME）、`cname_conflict`（CNAME 与其他记录共存于同一所有者）、`wildcard_shadow`（显式名称遮蔽通配符）。
+- 同一规则代码在同一区域内重叠时按最严格严重度收敛，`block` 优先于 `warn`；规则和命中项都按稳定顺序评估，结果确定。
+- 例外按 `rule_code`、`zone`、`owner` 精确匹配命中项；`expires_at` 过期的例外不再抑制，其标识写入结论的 `expired_exception_ids`。
+- 结论含 `block` 级生效命中时 `outcome` 为 `block`，正式追加被拒绝并返回 `policy_blocked`，不写入任何版本；含 `warn` 级生效命中时结论随版本一起保存。
+- 命中项超过 100 条时结论截断保存并置 `truncated`，`finding_counts` 与 `outcome` 始终基于完整命中集计算。
+- 未绑定策略包的计划保持原行为：不评估、不阻断、不保存结论，条目也不接受通配符所有者；绑定策略的计划允许所有者使用单个左侧 `*.` 通配符标签。
+- 版本预检 `POST /v1/plans/{id}/policy-check` 与正式追加使用同一评估函数，相同内容得到同一策略结论；预检只读，不改变任何状态。
 
 ## 5. 工作流
 
@@ -212,6 +248,27 @@ ready --lease--> leased --report--> ready
 
 失败行为：缺少区域版本、没有探针、请求键冲突或保存失败不会更新计划摘要。
 
+### W5 区域策略包和版本预检
+
+入口：
+
+- `PUT /v1/policies`
+- `GET /v1/policies`
+- `GET /v1/policies/{id}`
+- `POST /v1/plans/{id}/policy-check`
+- `GET /v1/plans/{id}/revisions/latest`
+
+步骤：
+
+1. HTTP 层严格解码策略包输入。
+2. 策略服务校验规则代码、严重度、适用区域和例外，分配同名递增版本并原子落库。
+3. 计划在创建时绑定策略包并固定版本。
+4. 版本预检和正式追加调用同一个纯评估函数生成策略结论。
+
+成功行为：阻断结论使追加返回 `policy_blocked` 且不产生版本；告警和通过结论随不可变版本保存，可通过最新版本查询读取。
+
+失败行为：非法规则、重复规则、缺失策略包或例外字段非法时返回稳定校验错误，不留下部分状态。
+
 ## 6. 模块边界
 
 | 模块 | 路径 | 责任 |
@@ -219,6 +276,7 @@ ready --lease--> leased --report--> ready
 | entry | `cmd/zrc` | 进程启动、参数解析、信号关闭 |
 | httpapi | `internal/httpapi` | 路由、严格解码、中间件和错误映射 |
 | plan | `internal/plan` | 计划生命周期和区域版本规则 |
+| policy | `internal/policy` | 版本化策略包管理 |
 | fleet | `internal/fleet` | 解析节点档案、唯一名称和分页查询 |
 | allocation | `internal/allocation` | 节点筛选、幂等分配组和租约生命周期 |
 | probe | `internal/probe` | 探针校验、幂等写入和租约完成 |
@@ -253,6 +311,8 @@ ready --lease--> leased --report--> ready
 - `GET /v1/plans`
 - `GET /v1/plans/{id}`
 - `PATCH /v1/plans/{id}/revisions`
+- `GET /v1/plans/{id}/revisions/latest`
+- `POST /v1/plans/{id}/policy-check`
 - `PATCH /v1/plans/{id}/activate`
 - `PATCH /v1/plans/{id}/complete`
 - `PATCH /v1/plans/{id}/leases`
@@ -260,6 +320,9 @@ ready --lease--> leased --report--> ready
 - `PATCH /v1/leases/{id}/probes`
 - `PATCH /v1/plans/{id}/assessments`
 - `GET /v1/plans/{id}/assessments/latest`
+- `PUT /v1/policies`
+- `GET /v1/policies`
+- `GET /v1/policies/{id}`
 
 ## 8. 工程机制
 
@@ -282,5 +345,6 @@ ready --lease--> leased --report--> ready
 2. 节点分配、租约唯一性、幂等重放和无可用节点冲突。
 3. 探针首写、同键重放、同键异载荷冲突和释放冲突。
 4. 一致性通过、审核触发、最新结果查询和幂等重放。
+5. 策略包版本化、规则重叠收敛、例外过期、预检与追加结论一致、阻断与告警落库、大条目集截断和未启用策略计划的原行为。
 
 每条探针使用独立临时目录，不访问外部网络，结束后关闭服务。

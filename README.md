@@ -37,10 +37,11 @@ go run ./cmd/zrc \
 ```text
 cmd/zrc                     服务进程入口
 cmd/workflowprobe           工作流探针入口
-internal/domain             聚合、DNS 值校验、状态迁移和判定计算
+internal/domain             聚合、DNS 值校验、状态迁移、策略评估和判定计算
 internal/store              锁内副本事务和原子 JSON 持久化
 internal/platform           时钟、标识、游标和文件锁
 internal/plan               计划及区域版本服务
+internal/policy             版本化区域策略包管理
 internal/fleet              解析节点档案服务
 internal/allocation         节点选择和租约生命周期
 internal/probe              探针登记、幂等重放和租约完成
@@ -135,6 +136,71 @@ curl -sS -X PATCH http://127.0.0.1:8090/v1/plans/<plan_id>/assessments \
   -d '{"request_key": "assess-request-0001"}'
 ```
 
+## 区域策略包
+
+区域策略包把顶点 CNAME、CNAME 冲突和通配符遮蔽等业务风险规则写入不可变的版本化实体。策略包创建后不可修改，升级就是发布同名的新版本；计划在创建时通过 `policy_bundle_id` 绑定并固定版本，历史版本上已保存的结论不会被追溯改写。
+
+创建策略包：
+
+```bash
+curl -sS -X PUT http://127.0.0.1:8090/v1/policies \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "name": "edge-guard",
+    "rules": [
+      {"code": "apex_cname", "severity": "block"},
+      {"code": "cname_conflict", "severity": "block", "zones": ["edge.example"]},
+      {"code": "wildcard_shadow", "severity": "warn"}
+    ],
+    "exceptions": [
+      {
+        "rule_code": "wildcard_shadow",
+        "owner": "api.edge.example",
+        "reason": "managed api alias",
+        "expires_at": "2027-01-01T00:00:00Z"
+      }
+    ]
+  }'
+```
+
+- 规则代码：`apex_cname`（顶点 CNAME）、`cname_conflict`（CNAME 与其他记录共存）、`wildcard_shadow`（显式名称遮蔽通配符）。
+- `severity` 为 `block` 或 `warn`；`zones` 为空表示适用全部区域。同一代码在同一区域重叠时按最严格严重度收敛。
+- 例外按 `rule_code`、`zone`、`owner` 匹配命中项，过期例外不再抑制，其标识写入结论的 `expired_exception_ids`。
+
+创建计划时绑定策略包：
+
+```bash
+curl -sS -X PUT http://127.0.0.1:8090/v1/plans \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "zone": "edge.example",
+    "minimum_success_ratio": 1,
+    "maximum_latency_ms": 80,
+    "expected_nodes": 2,
+    "policy_bundle_id": "<bundle_id>"
+  }'
+```
+
+版本预检与正式追加生成同一策略结论；预检只读，可在写入前确认结果：
+
+```bash
+curl -sS -X POST http://127.0.0.1:8090/v1/plans/<plan_id>/policy-check \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "serial": 2026092501,
+    "authority": "ns1.edge.example",
+    "entries": [
+      {"owner": "*.edge.example", "type": "A", "value": "192.0.2.10"},
+      {"owner": "api.edge.example", "type": "A", "value": "192.0.2.20"}
+    ]
+  }'
+```
+
+- 结论为 `block` 时正式追加返回 `policy_blocked`（HTTP 422），不写入任何版本。
+- 结论为 `warn` 或 `pass` 时版本正常写入，完整结论随不可变版本保存，可通过 `GET /v1/plans/{id}/revisions/latest` 读取。
+- 命中项超过 100 条时结论截断并置 `truncated`，`finding_counts` 和 `outcome` 始终基于完整命中集。
+- 绑定策略的计划的条目所有者允许单个左侧 `*.` 通配符标签；未绑定策略的计划保持原行为，不评估、不阻断、不保存结论，也不接受通配符。
+
 ## API 概览
 
 成功响应：
@@ -171,6 +237,8 @@ curl -sS -X PATCH http://127.0.0.1:8090/v1/plans/<plan_id>/assessments \
 | `GET` | `/v1/plans` | 按状态分页查询计划 |
 | `GET` | `/v1/plans/{id}` | 查询计划 |
 | `PATCH` | `/v1/plans/{id}/revisions` | 添加区域版本 |
+| `GET` | `/v1/plans/{id}/revisions/latest` | 查询最新区域版本及其策略结论 |
+| `POST` | `/v1/plans/{id}/policy-check` | 版本预检，只读返回策略结论 |
 | `PATCH` | `/v1/plans/{id}/activate` | 激活计划 |
 | `PATCH` | `/v1/plans/{id}/complete` | 完成计划 |
 | `PATCH` | `/v1/plans/{id}/leases` | 给节点分配租约 |
@@ -178,12 +246,17 @@ curl -sS -X PATCH http://127.0.0.1:8090/v1/plans/<plan_id>/assessments \
 | `PATCH` | `/v1/leases/{id}/probes` | 登记探针并完成租约 |
 | `PATCH` | `/v1/plans/{id}/assessments` | 创建一致性判定 |
 | `GET` | `/v1/plans/{id}/assessments/latest` | 查询最近判定 |
+| `PUT` | `/v1/policies` | 创建策略包新版本 |
+| `GET` | `/v1/policies` | 按名称分页查询策略包 |
+| `GET` | `/v1/policies/{id}` | 查询策略包 |
 
 ## 状态及失败行为
 
 - 计划按 `draft -> active -> completed` 单向迁移，激活和完成需要匹配版本。
 - 区域版本只在计划草稿状态可追加，序列号严格递增且内容不可变。
 - A、AAAA、CNAME 条目在写入前规范化并稳定排序，重复条目直接拒绝。
+- 绑定策略包的计划在追加时评估区域策略：阻断命中返回 `policy_blocked` 且不写版本，告警命中随版本保存结论。
+- 策略包不可变且按名称递增版本，升级不影响已绑定旧版本的计划和历史版本结论。
 - 节点按 `ready -> leased -> ready` 变化，隔离节点不会被选中。
 - 一个节点同一时刻最多有一个 `claimed` 租约。
 - 相同请求键和相同内容可安全重放；同键异载荷返回 `idempotency_conflict`。
@@ -216,6 +289,7 @@ go run ./cmd/workflowprobe plan-revision-lifecycle
 go run ./cmd/workflowprobe node-lease-allocation
 go run ./cmd/workflowprobe probe-ingestion
 go run ./cmd/workflowprobe consistency-assessment
+go run ./cmd/workflowprobe zone-policy-enforcement
 ```
 
 探针不访问外部网络，也不依赖已有状态文件。

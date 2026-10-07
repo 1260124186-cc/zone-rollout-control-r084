@@ -72,6 +72,29 @@ func (s *Server) addRevision(w http.ResponseWriter, r *http.Request) {
 	sendData(w, r, http.StatusCreated, result)
 }
 
+func (s *Server) checkRevisionPolicy(w http.ResponseWriter, r *http.Request) {
+	var input domain.RevisionCreateInput
+	if err := decode(w, r, &input); err != nil {
+		sendError(w, r, err)
+		return
+	}
+	conclusion, err := s.plans.CheckRevisionPolicy(r.Context(), r.PathValue("id"), input)
+	if err != nil {
+		sendError(w, r, err)
+		return
+	}
+	sendData(w, r, http.StatusOK, conclusion)
+}
+
+func (s *Server) latestRevision(w http.ResponseWriter, r *http.Request) {
+	revision, err := s.plans.LatestRevision(r.Context(), r.PathValue("id"))
+	if err != nil {
+		sendError(w, r, err)
+		return
+	}
+	sendData(w, r, http.StatusOK, revision)
+}
+
 func (s *Server) activatePlan(w http.ResponseWriter, r *http.Request) {
 	var input versionInput
 	if err := decode(w, r, &input); err != nil {

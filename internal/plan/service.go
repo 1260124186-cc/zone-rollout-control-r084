@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"reflect"
 	"sort"
+	"time"
 
 	"solo-0014-zone-rollout-control/internal/domain"
 	"solo-0014-zone-rollout-control/internal/platform"
@@ -38,6 +39,14 @@ func (s *Service) Create(ctx context.Context, input domain.PlanCreateInput) (dom
 		CreatedAt:           now,
 	}
 	err := s.store.Write(ctx, func(state *domain.State) error {
+		if input.PolicyBundleID != "" {
+			bundle, ok := state.PolicyBundles[input.PolicyBundleID]
+			if !ok {
+				return domain.NotFound("policy_bundle", input.PolicyBundleID)
+			}
+			plan.PolicyBundleID = bundle.ID
+			plan.PolicyBundleVersion = bundle.Version
+		}
 		state.Plans[plan.ID] = plan
 		store.AddAudit(state, s.ids, "plan", plan.ID, "created", now, map[string]any{
 			"zone": plan.Zone,
@@ -52,7 +61,19 @@ func (s *Service) AddRevision(
 	planID string,
 	input domain.RevisionCreateInput,
 ) (domain.ZoneRevision, error) {
-	normalized, err := domain.NormalizeRevisionInput(input)
+	var plan domain.RolloutPlan
+	err := s.store.Read(ctx, func(state *domain.State) error {
+		found, ok := state.Plans[planID]
+		if !ok {
+			return domain.NotFound("plan", planID)
+		}
+		plan = found
+		return nil
+	})
+	if err != nil {
+		return domain.ZoneRevision{}, err
+	}
+	normalized, err := normalizeRevisionForPlan(plan, input)
 	if err != nil {
 		return domain.ZoneRevision{}, err
 	}
@@ -62,14 +83,14 @@ func (s *Service) AddRevision(
 	now := s.clock.Now().UTC()
 	var created domain.ZoneRevision
 	err = s.store.Write(ctx, func(state *domain.State) error {
-		plan, ok := state.Plans[planID]
+		current, ok := state.Plans[planID]
 		if !ok {
 			return domain.NotFound("plan", planID)
 		}
-		if plan.State != domain.PlanDraft {
+		if current.State != domain.PlanDraft {
 			return domain.InvalidState("revisions can be added only while plan is draft", map[string]any{
 				"plan_id": planID,
-				"state":   plan.State,
+				"state":   current.State,
 			})
 		}
 		for _, revision := range state.Revisions {
@@ -89,6 +110,13 @@ func (s *Service) AddRevision(
 				})
 			}
 		}
+		conclusion, err := evaluateRevisionPolicy(state, current, normalized.Entries, now)
+		if err != nil {
+			return err
+		}
+		if conclusion.Outcome == domain.OutcomeBlock {
+			return policyBlockedError(planID, conclusion)
+		}
 		created = domain.ZoneRevision{
 			ID:         s.ids.New("rev"),
 			PlanID:     planID,
@@ -98,10 +126,13 @@ func (s *Service) AddRevision(
 			EntryCount: len(normalized.Entries),
 			CreatedAt:  now,
 		}
+		if current.PolicyBundleID != "" {
+			created.Policy = &conclusion
+		}
 		state.Revisions[created.ID] = created
-		plan.LatestRevisionID = created.ID
-		plan.Version++
-		state.Plans[planID] = plan
+		current.LatestRevisionID = created.ID
+		current.Version++
+		state.Plans[planID] = current
 		store.AddAudit(state, s.ids, "revision", created.ID, "added", now, map[string]any{
 			"plan_id": planID,
 			"serial":  created.Serial,
@@ -109,6 +140,82 @@ func (s *Service) AddRevision(
 		return nil
 	})
 	return created, err
+}
+
+// CheckRevisionPolicy is the read-only precheck: it runs the same policy
+// evaluation the formal append would run, without persisting anything.
+// Plans without a policy bundle always receive the unbound conclusion.
+func (s *Service) CheckRevisionPolicy(
+	ctx context.Context,
+	planID string,
+	input domain.RevisionCreateInput,
+) (domain.PolicyConclusion, error) {
+	var conclusion domain.PolicyConclusion
+	err := s.store.Read(ctx, func(state *domain.State) error {
+		plan, ok := state.Plans[planID]
+		if !ok {
+			return domain.NotFound("plan", planID)
+		}
+		normalized, err := normalizeRevisionForPlan(plan, input)
+		if err != nil {
+			return err
+		}
+		if err := domain.ValidateRevisionInput(normalized); err != nil {
+			return err
+		}
+		result, err := evaluateRevisionPolicy(state, plan, normalized.Entries, s.clock.Now().UTC())
+		if err != nil {
+			return err
+		}
+		conclusion = result
+		return nil
+	})
+	return conclusion, err
+}
+
+// normalizeRevisionForPlan picks the entry grammar for the plan: plans with
+// a policy bundle may use wildcard owners, all other plans keep the original
+// strict grammar.
+func normalizeRevisionForPlan(
+	plan domain.RolloutPlan,
+	input domain.RevisionCreateInput,
+) (domain.RevisionCreateInput, error) {
+	if plan.PolicyBundleID == "" {
+		return domain.NormalizeRevisionInput(input)
+	}
+	return domain.NormalizeRevisionInputWithWildcard(input)
+}
+
+func evaluateRevisionPolicy(
+	state *domain.State,
+	plan domain.RolloutPlan,
+	entries []domain.ZoneEntry,
+	now time.Time,
+) (domain.PolicyConclusion, error) {
+	if plan.PolicyBundleID == "" {
+		return domain.UnboundPolicyConclusion(len(entries), now), nil
+	}
+	bundle, ok := state.PolicyBundles[plan.PolicyBundleID]
+	if !ok {
+		return domain.PolicyConclusion{}, domain.NewError(domain.CodeStorageFailure, "plan references a missing policy bundle", map[string]any{
+			"policy_bundle_id": plan.PolicyBundleID,
+		})
+	}
+	return domain.EvaluatePolicy(plan.Zone, entries, bundle, now), nil
+}
+
+func policyBlockedError(planID string, conclusion domain.PolicyConclusion) *domain.DomainError {
+	details := map[string]any{
+		"plan_id":               planID,
+		"policy_bundle_id":      conclusion.BundleID,
+		"policy_bundle_version": conclusion.BundleVersion,
+		"finding_counts":        conclusion.FindingCounts,
+		"findings":              conclusion.Findings,
+	}
+	if len(conclusion.ExpiredExceptionIDs) > 0 {
+		details["expired_exception_ids"] = conclusion.ExpiredExceptionIDs
+	}
+	return domain.NewError(domain.CodePolicyBlocked, "zone revision is blocked by the plan policy bundle", details)
 }
 
 func (s *Service) Activate(

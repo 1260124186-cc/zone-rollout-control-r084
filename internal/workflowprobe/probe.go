@@ -20,6 +20,8 @@ func Run(args []string, output io.Writer) error {
 		run = runProbeIngestion
 	case "consistency-assessment":
 		run = runConsistencyAssessment
+	case "zone-policy-enforcement":
+		run = runZonePolicyEnforcement
 	default:
 		return fmt.Errorf("unsupported workflow %q", args[0])
 	}
@@ -34,6 +36,7 @@ type apiFailure struct {
 	Status  int
 	Code    string
 	Message string
+	Details map[string]any
 }
 
 func (e *apiFailure) Error() string {

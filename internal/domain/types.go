@@ -49,13 +49,14 @@ type ZoneEntry struct {
 }
 
 type ZoneRevision struct {
-	ID         string      `json:"id"`
-	PlanID     string      `json:"plan_id"`
-	Serial     uint32      `json:"serial"`
-	Authority  string      `json:"authority"`
-	Entries    []ZoneEntry `json:"entries"`
-	EntryCount int         `json:"entry_count"`
-	CreatedAt  time.Time   `json:"created_at"`
+	ID         string            `json:"id"`
+	PlanID     string            `json:"plan_id"`
+	Serial     uint32            `json:"serial"`
+	Authority  string            `json:"authority"`
+	Entries    []ZoneEntry       `json:"entries"`
+	EntryCount int               `json:"entry_count"`
+	Policy     *PolicyConclusion `json:"policy,omitempty"`
+	CreatedAt  time.Time         `json:"created_at"`
 }
 
 type RolloutPlan struct {
@@ -68,6 +69,8 @@ type RolloutPlan struct {
 	Version             uint64     `json:"version"`
 	LatestRevisionID    string     `json:"latest_revision_id,omitempty"`
 	LatestAssessmentID  string     `json:"latest_assessment_id,omitempty"`
+	PolicyBundleID      string     `json:"policy_bundle_id,omitempty"`
+	PolicyBundleVersion int        `json:"policy_bundle_version,omitempty"`
 	CreatedAt           time.Time  `json:"created_at"`
 	ActivatedAt         *time.Time `json:"activated_at,omitempty"`
 	CompletedAt         *time.Time `json:"completed_at,omitempty"`
@@ -152,6 +155,7 @@ type State struct {
 	LeaseGroups           map[string]LeaseGroup        `json:"lease_groups"`
 	Probes                map[string]Probe             `json:"probes"`
 	Assessments           map[string]RolloutAssessment `json:"assessments"`
+	PolicyBundles         map[string]PolicyBundle      `json:"policy_bundles"`
 	LeaseRequestKeys      map[string]string            `json:"lease_request_keys"`
 	AssessmentRequestKeys map[string]string            `json:"assessment_request_keys"`
 	AuditEvents           []AuditEvent                 `json:"audit_events"`
@@ -169,5 +173,10 @@ type PlanPage struct {
 
 type NodePage struct {
 	Items []ResolverNode `json:"items"`
+	Meta  PageMeta       `json:"meta"`
+}
+
+type PolicyBundlePage struct {
+	Items []PolicyBundle `json:"items"`
 	Meta  PageMeta       `json:"meta"`
 }

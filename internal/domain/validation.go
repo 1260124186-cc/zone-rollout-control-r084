@@ -23,6 +23,7 @@ type PlanCreateInput struct {
 	MinimumSuccessRatio float64 `json:"minimum_success_ratio"`
 	MaximumLatencyMS    int     `json:"maximum_latency_ms"`
 	ExpectedNodes       int     `json:"expected_nodes"`
+	PolicyBundleID      string  `json:"policy_bundle_id"`
 }
 
 type RevisionCreateInput struct {
@@ -58,6 +59,7 @@ type AssessmentInput struct {
 
 func NormalizePlanInput(input PlanCreateInput) PlanCreateInput {
 	input.Zone = canonicalName(input.Zone)
+	input.PolicyBundleID = strings.TrimSpace(input.PolicyBundleID)
 	return input
 }
 
@@ -76,13 +78,30 @@ func ValidatePlanInput(input PlanCreateInput) error {
 	if input.ExpectedNodes < 1 || input.ExpectedNodes > 500 {
 		details["expected_nodes"] = "must be between 1 and 500"
 	}
+	if count := utf8.RuneCountInString(input.PolicyBundleID); count > 64 {
+		details["policy_bundle_id"] = "must be at most 64 characters"
+	}
 	if len(details) > 0 {
 		return Validation("plan input is invalid", details)
 	}
 	return nil
 }
 
+// NormalizeRevisionInput keeps the original strict grammar: wildcard owner
+// names are rejected. Plans without a policy bundle use this path, so their
+// behavior is unchanged.
 func NormalizeRevisionInput(input RevisionCreateInput) (RevisionCreateInput, error) {
+	return normalizeRevisionInput(input, false)
+}
+
+// NormalizeRevisionInputWithWildcard additionally accepts a leading "*."
+// wildcard label in owner names. It is used only for plans that enable a
+// policy bundle, where wildcard shadowing is a managed risk.
+func NormalizeRevisionInputWithWildcard(input RevisionCreateInput) (RevisionCreateInput, error) {
+	return normalizeRevisionInput(input, true)
+}
+
+func normalizeRevisionInput(input RevisionCreateInput, allowWildcard bool) (RevisionCreateInput, error) {
 	input.Authority = canonicalName(input.Authority)
 	entries := make([]ZoneEntry, 0, len(input.Entries))
 	for _, entry := range input.Entries {
@@ -126,7 +145,7 @@ func NormalizeRevisionInput(input RevisionCreateInput) (RevisionCreateInput, err
 				"value": "type must be A, AAAA, or CNAME",
 			})
 		}
-		if err := validateCanonicalName(owner); err != nil {
+		if err := validateOwnerName(owner, allowWildcard); err != nil {
 			return RevisionCreateInput{}, Validation("zone entry is invalid", map[string]any{
 				"owner": owner,
 				"value": err.Error(),
@@ -268,6 +287,20 @@ func validateRequestKey(value string) error {
 
 func canonicalName(value string) string {
 	return strings.TrimSuffix(strings.TrimSpace(strings.ToLower(value)), ".")
+}
+
+// validateOwnerName validates an entry owner. When allowWildcard is set, a
+// single leading "*." label is accepted and the remainder must be a valid
+// canonical name.
+func validateOwnerName(value string, allowWildcard bool) error {
+	if allowWildcard && strings.HasPrefix(value, "*.") {
+		rest := strings.TrimPrefix(value, "*.")
+		if rest == "" || strings.HasPrefix(rest, "*") {
+			return Validation("wildcard must be a single leftmost label", nil)
+		}
+		return validateCanonicalName(rest)
+	}
+	return validateCanonicalName(value)
 }
 
 func validateCanonicalName(value string) error {
