@@ -41,6 +41,7 @@ internal/domain             聚合、DNS 值校验、状态迁移和判定计算
 internal/store              锁内副本事务和原子 JSON 持久化
 internal/platform           时钟、标识、游标和文件锁
 internal/plan               计划及区域版本服务
+internal/policy             版本化区域策略包（规则、严重度、区域范围、例外）
 internal/fleet              解析节点档案服务
 internal/allocation         节点选择和租约生命周期
 internal/probe              探针登记、幂等重放和租约完成
@@ -170,14 +171,40 @@ curl -sS -X PATCH http://127.0.0.1:8090/v1/plans/<plan_id>/assessments \
 | `PUT` | `/v1/plans` | 创建计划草稿 |
 | `GET` | `/v1/plans` | 按状态分页查询计划 |
 | `GET` | `/v1/plans/{id}` | 查询计划 |
-| `PATCH` | `/v1/plans/{id}/revisions` | 添加区域版本 |
+| `PATCH` | `/v1/plans/{id}/revisions` | 添加区域版本（启用策略时按策略结论放行或阻断） |
+| `POST` | `/v1/plans/{id}/revisions/precheck` | 预检区域版本，返回与正式追加一致的策略结论 |
 | `PATCH` | `/v1/plans/{id}/activate` | 激活计划 |
 | `PATCH` | `/v1/plans/{id}/complete` | 完成计划 |
+| `PUT` | `/v1/policies` | 创建版本化区域策略包（首个不可变版本） |
+| `GET` | `/v1/policies/{id}` | 查询策略包 |
+| `PATCH` | `/v1/policies/{id}/versions` | 追加策略包新版本 |
+| `GET` | `/v1/policies/{id}/versions` | 列出策略包全部版本 |
+| `GET` | `/v1/policies/{id}/versions/{versionId}` | 查询指定策略版本 |
 | `PATCH` | `/v1/plans/{id}/leases` | 给节点分配租约 |
 | `PATCH` | `/v1/leases/{id}/release` | 提前释放租约 |
 | `PATCH` | `/v1/leases/{id}/probes` | 登记探针并完成租约 |
 | `PATCH` | `/v1/plans/{id}/assessments` | 创建一致性判定 |
 | `GET` | `/v1/plans/{id}/assessments/latest` | 查询最近判定 |
+
+## 版本化区域策略
+
+区域条目基础校验（名称、地址、排序去重）始终生效。在此之上，可以创建版本化区域策略包，把规则、严重度、适用区域和例外作为可管理实体维护。
+
+内置规则代码：
+
+- `apex_cname`：区域顶点不得携带 CNAME 记录。
+- `cname_conflict`：CNAME 所有者不得与其他记录类型共存，也不得有多条 CNAME。
+- `wildcard_shadow`：通配符所有者（如 `*.api.zone`）遮蔽其下一层的精确所有者。
+
+规则严重度为 `block`、`warn` 或 `ignore`；`zones` 为空表示适用于全部区域，否则只对列出的区域生效。例外按 `rule_code` 和具体 `owner` 精确豁免，并携带 `expires_at`；过期例外不再压制发现。
+
+创建计划时通过 `policy_package_id` 绑定策略：只能绑定当前处于启用状态的策略包及其最新版本，服务会固定该版本的标识（`policy_version_id`）。是否强制检查只取决于被固定版本自身不可变的 `enabled` 快照，因此此后追加禁用版本或升级规则都不会影响该计划及其历史版本。未绑定策略的计划保持原有行为（包括不接受通配符所有者）。
+
+预检（`POST /v1/plans/{id}/revisions/precheck`）与正式追加使用同一个纯函数评估器，因此相同内容产生相同结论：
+
+- 存在 `block` 发现时 `allowed=false`，正式追加返回 `422 policy_violation`，阻断项不进入不可变版本。
+- 仅存在 `warn` 发现时允许追加，策略结论（含告警、被例外压制的记录和评估时刻）随版本保存在 `policy` 字段。
+- 规则重叠按严重度（block > warn > ignore）再按规则 ID 确定唯一胜出规则，全部候选记录在发现的 `candidate_rule_ids` 中；发现与被压制记录按固定顺序输出，大条目集结果确定可解释。
 
 ## 状态及失败行为
 
@@ -216,6 +243,7 @@ go run ./cmd/workflowprobe plan-revision-lifecycle
 go run ./cmd/workflowprobe node-lease-allocation
 go run ./cmd/workflowprobe probe-ingestion
 go run ./cmd/workflowprobe consistency-assessment
+go run ./cmd/workflowprobe policy-zone-governance
 ```
 
 探针不访问外部网络，也不依赖已有状态文件。

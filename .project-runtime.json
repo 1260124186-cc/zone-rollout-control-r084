@@ -23,6 +23,10 @@
     {
       "workflow_id": "consistency-assessment",
       "command": "go run ./cmd/workflowprobe consistency-assessment"
+    },
+    {
+      "workflow_id": "policy-zone-governance",
+      "command": "go run ./cmd/workflowprobe policy-zone-governance"
     }
   ]
 }

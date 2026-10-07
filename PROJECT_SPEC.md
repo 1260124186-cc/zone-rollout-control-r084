@@ -82,6 +82,18 @@ Zone Rollout Control 是面向 DNS 运维人员的 Go HTTP 控制面。它把区
 - `probe_count`、`success_count`、`success_ratio`、`maximum_latency_ms`。
 - `created_at`。
 
+### PolicyPackage / PolicyPackageVersion
+
+版本化区域策略包及其不可变版本。
+
+- `PolicyPackage`：`id`、`name`、`description`、`version`、`enabled`、`latest_version_id`、时间戳。
+- `PolicyPackageVersion`：`id`、`package_id`、`version`、`enabled`、`rules`、`exceptions`、`created_at`，一旦写入不可改写。
+- `PolicyRule`：`id`、`code`、`severity`（`block`/`warn`/`ignore`）、`zones`（空表示全部区域）、`enabled`。
+- 内置规则代码：`apex_cname`、`cname_conflict`、`wildcard_shadow`。
+- `PolicyException`：`id`、`rule_code`、具体 `owner`、`expires_at`、`reason`；例外是不可变版本的一部分，过期与否在评估时刻按服务时钟确定。
+
+计划通过创建请求中的 `policy_package_id` 绑定策略：只能绑定启用中的包及其最新版本，服务固定 `policy_version_id`；是否强制检查只取决于该不可变版本自身的 `enabled` 快照，策略包的启停和后续版本升级只影响此后创建的计划。`ZoneRevision.policy` 保存追加时的不可变策略结论（`PolicyVerdict`），未启用强制检查时为空。
+
 ## 4. 状态和规则
 
 ### 滚动计划状态
@@ -117,6 +129,21 @@ ready --lease--> leased --report--> ready
 - 区域名称、所有者名称和规范名称必须规范化为小写并移除末尾句点。
 - 重复加入完全相同的版本内容返回 `duplicate_revision`。
 
+### 区域策略规则
+
+- 策略是可管理实体：规则、严重度、适用区域和例外通过策略包版本接口维护，版本不可变。
+- 预检（`POST /v1/plans/{id}/revisions/precheck`）与正式追加共用同一个纯领域评估器，结论字段完全一致。
+- 规则语义：
+  - `apex_cname`：区域顶点存在 CNAME 条目时产生发现。
+  - `cname_conflict`：同一所有者同时存在 CNAME 与其他类型，或存在多条 CNAME 时产生发现。
+  - `wildcard_shadow`：`*.parent` 形式的通配符遮蔽其正下一层的精确所有者，每对（通配符、精确所有者）产生一条归因于精确所有者的发现。
+- 严重度：`block` 发现使结论 `allowed=false`，正式追加返回 `422 policy_violation` 且不写入版本；`warn` 与 `ignore` 不阻断，`warn` 随版本保存。
+- 规则重叠按严重度等级（block > warn > ignore）、再按规则 ID 确定性地选出唯一胜出规则；全部候选 ID 记录在 `candidate_rule_ids`。
+- 例外只在未过期时压制发现；多个匹配例外中过期时刻最早者胜出，平手按 ID；被压制的发现以例外 ID 和到期时间记录在 `suppressed` 中。
+- 发现与被压制记录均按代码、所有者等固定顺序排序，大条目集结果确定可解释。
+- 策略包升级只追加新版本，不追溯改写历史版本；计划在创建时固定版本，旧计划继续按旧版本评估。
+- 未绑定策略包的计划完全保持原行为（包括拒绝通配符所有者、不产生策略字段）。
+
 ### 探针幂等
 
 - `observed_at` 不能晚于服务时间五分钟以上。
@@ -150,6 +177,7 @@ ready --lease--> leased --report--> ready
 
 - `PUT /v1/plans`
 - `PATCH /v1/plans/{id}/revisions`
+- `POST /v1/plans/{id}/revisions/precheck`
 - `PATCH /v1/plans/{id}/activate`
 - `PATCH /v1/plans/{id}/complete`
 
@@ -212,6 +240,28 @@ ready --lease--> leased --report--> ready
 
 失败行为：缺少区域版本、没有探针、请求键冲突或保存失败不会更新计划摘要。
 
+### W5 版本化区域策略治理
+
+入口：
+
+- `PUT /v1/policies`
+- `PATCH /v1/policies/{id}/versions`
+- `GET /v1/policies/{id}`、`GET /v1/policies/{id}/versions`、`GET /v1/policies/{id}/versions/{versionId}`
+- `POST /v1/plans/{id}/revisions/precheck`
+- `PATCH /v1/plans/{id}/revisions`（带 `policy_package_id` 创建的计划）
+
+步骤：
+
+1. HTTP 层严格解码策略包、版本和预检请求。
+2. 策略服务规范化并校验规则代码、严重度、区域范围、例外引用和到期窗口，在锁内写入不可变版本。
+3. 创建计划时解析并固定当前策略版本标识。
+4. 预检与正式追加都调用同一个纯评估器，输出同一结构的策略结论。
+5. 正式追加在存在阻断发现时整体失败，不写入版本；存在告警时把结论随版本持久化。
+
+成功行为：阻断项不进入不可变版本；告警项随版本保存；策略升级不影响旧计划。
+
+失败行为：非法策略载荷、阻断发现、引用缺失的策略版本返回稳定错误且不修改状态。
+
 ## 6. 模块边界
 
 | 模块 | 路径 | 责任 |
@@ -223,6 +273,7 @@ ready --lease--> leased --report--> ready
 | allocation | `internal/allocation` | 节点筛选、幂等分配组和租约生命周期 |
 | probe | `internal/probe` | 探针校验、幂等写入和租约完成 |
 | assessment | `internal/assessment` | 探针聚合和一致性判定 |
+| policy | `internal/policy` | 版本化区域策略包、不可变规则与例外、计划固定版本解析 |
 | domain | `internal/domain` | 聚合、值校验、状态迁移和纯计算 |
 | store | `internal/store` | 锁内副本事务和原子 JSON 持久化 |
 | platform | `internal/platform` | 时钟、标识、游标和文件锁 |
@@ -253,6 +304,7 @@ ready --lease--> leased --report--> ready
 - `GET /v1/plans`
 - `GET /v1/plans/{id}`
 - `PATCH /v1/plans/{id}/revisions`
+- `POST /v1/plans/{id}/revisions/precheck`
 - `PATCH /v1/plans/{id}/activate`
 - `PATCH /v1/plans/{id}/complete`
 - `PATCH /v1/plans/{id}/leases`
@@ -260,6 +312,11 @@ ready --lease--> leased --report--> ready
 - `PATCH /v1/leases/{id}/probes`
 - `PATCH /v1/plans/{id}/assessments`
 - `GET /v1/plans/{id}/assessments/latest`
+- `PUT /v1/policies`
+- `GET /v1/policies/{id}`
+- `PATCH /v1/policies/{id}/versions`
+- `GET /v1/policies/{id}/versions`
+- `GET /v1/policies/{id}/versions/{versionId}`
 
 ## 8. 工程机制
 
@@ -282,5 +339,6 @@ ready --lease--> leased --report--> ready
 2. 节点分配、租约唯一性、幂等重放和无可用节点冲突。
 3. 探针首写、同键重放、同键异载荷冲突和释放冲突。
 4. 一致性通过、审核触发、最新结果查询和幂等重放。
+5. 策略包创建与升级、预检/正式追加一致性、阻断与告警、例外过期、规则重叠、区域范围和未启用策略的原行为。
 
 每条探针使用独立临时目录，不访问外部网络，结束后关闭服务。

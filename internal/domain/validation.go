@@ -1,8 +1,6 @@
 package domain
 
 import (
-	"net"
-	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -23,6 +21,7 @@ type PlanCreateInput struct {
 	MinimumSuccessRatio float64 `json:"minimum_success_ratio"`
 	MaximumLatencyMS    int     `json:"maximum_latency_ms"`
 	ExpectedNodes       int     `json:"expected_nodes"`
+	PolicyPackageID     string  `json:"policy_package_id,omitempty"`
 }
 
 type RevisionCreateInput struct {
@@ -80,80 +79,6 @@ func ValidatePlanInput(input PlanCreateInput) error {
 		return Validation("plan input is invalid", details)
 	}
 	return nil
-}
-
-func NormalizeRevisionInput(input RevisionCreateInput) (RevisionCreateInput, error) {
-	input.Authority = canonicalName(input.Authority)
-	entries := make([]ZoneEntry, 0, len(input.Entries))
-	for _, entry := range input.Entries {
-		owner := canonicalName(entry.Owner)
-		entryType := EntryType(strings.ToUpper(strings.TrimSpace(string(entry.Type))))
-		value := strings.TrimSpace(entry.Value)
-		switch entryType {
-		case EntryA:
-			parsed := net.ParseIP(value)
-			if parsed == nil || parsed.To4() == nil {
-				return RevisionCreateInput{}, Validation("zone entry is invalid", map[string]any{
-					"owner": owner,
-					"type":  entryType,
-					"value": "must be a valid IPv4 address",
-				})
-			}
-			value = parsed.To4().String()
-		case EntryAAAA:
-			parsed := net.ParseIP(value)
-			if parsed == nil || parsed.To4() != nil {
-				return RevisionCreateInput{}, Validation("zone entry is invalid", map[string]any{
-					"owner": owner,
-					"type":  entryType,
-					"value": "must be a valid IPv6 address",
-				})
-			}
-			value = parsed.String()
-		case EntryCNAME:
-			value = canonicalName(value)
-			if err := validateCanonicalName(value); err != nil {
-				return RevisionCreateInput{}, Validation("zone entry is invalid", map[string]any{
-					"owner": owner,
-					"type":  entryType,
-					"value": err.Error(),
-				})
-			}
-		default:
-			return RevisionCreateInput{}, Validation("zone entry is invalid", map[string]any{
-				"owner": owner,
-				"type":  entry.Type,
-				"value": "type must be A, AAAA, or CNAME",
-			})
-		}
-		if err := validateCanonicalName(owner); err != nil {
-			return RevisionCreateInput{}, Validation("zone entry is invalid", map[string]any{
-				"owner": owner,
-				"value": err.Error(),
-			})
-		}
-		entries = append(entries, ZoneEntry{Owner: owner, Type: entryType, Value: value})
-	}
-	sort.Slice(entries, func(i, j int) bool {
-		if entries[i].Owner != entries[j].Owner {
-			return entries[i].Owner < entries[j].Owner
-		}
-		if entries[i].Type != entries[j].Type {
-			return entries[i].Type < entries[j].Type
-		}
-		return entries[i].Value < entries[j].Value
-	})
-	for index := 1; index < len(entries); index++ {
-		if entries[index] == entries[index-1] {
-			return RevisionCreateInput{}, Validation("zone entry is duplicated", map[string]any{
-				"owner": entries[index].Owner,
-				"type":  entries[index].Type,
-				"value": entries[index].Value,
-			})
-		}
-	}
-	input.Entries = entries
-	return input, nil
 }
 
 func ValidateRevisionInput(input RevisionCreateInput) error {

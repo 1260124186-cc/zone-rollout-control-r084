@@ -39,6 +39,11 @@
       "responsibility": "probe aggregation, deterministic verdicts, and latest result reads"
     },
     {
+      "id": "policy",
+      "path": "internal/policy",
+      "responsibility": "versioned zone policy packages, immutable rules and exceptions, and pinned resolution"
+    },
+    {
       "id": "domain",
       "path": "internal/domain",
       "responsibility": "entities, DNS value validation, transitions, and stable errors"
@@ -151,6 +156,28 @@
         "httpapi",
         "assessment",
         "probe",
+        "domain",
+        "storage"
+      ]
+    },
+    {
+      "id": "policy-zone-governance",
+      "name": "Versioned zone policy governance",
+      "entry": "PUT /v1/policies -> versions -> POST /v1/plans/{id}/revisions/precheck -> PATCH revisions",
+      "steps": [
+        "manage rules, severity, zone scope, and exceptions in immutable package versions",
+        "pin the exact policy version when creating a plan",
+        "run one shared deterministic evaluation for precheck and formal append",
+        "reject blocking findings, persist warning findings with the immutable revision",
+        "resolve rule overlap deterministically and suppress only non-expired exceptions"
+      ],
+      "success": "blocking content never enters a revision, warnings are saved, and package upgrades never rewrite history",
+      "failure": "invalid packages, blocking findings, and stale policy references return stable errors without state changes",
+      "verification": "workflowprobe policy-zone-governance covers apex CNAME, CNAME conflict, wildcard shadow, exceptions, overlap, scoping, and upgrade isolation",
+      "module_ids": [
+        "httpapi",
+        "policy",
+        "plan",
         "domain",
         "storage"
       ]

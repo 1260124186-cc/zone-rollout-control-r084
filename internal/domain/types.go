@@ -55,22 +55,32 @@ type ZoneRevision struct {
 	Authority  string      `json:"authority"`
 	Entries    []ZoneEntry `json:"entries"`
 	EntryCount int         `json:"entry_count"`
-	CreatedAt  time.Time   `json:"created_at"`
+	// Policy is the immutable policy conclusion captured when the revision
+	// was appended. nil for plans that did not enable a policy package, so
+	// historical behavior and JSON shape are preserved.
+	Policy    *PolicyVerdict `json:"policy,omitempty"`
+	CreatedAt time.Time      `json:"created_at"`
 }
 
 type RolloutPlan struct {
-	ID                  string     `json:"id"`
-	Zone                string     `json:"zone"`
-	State               PlanState  `json:"state"`
-	MinimumSuccessRatio float64    `json:"minimum_success_ratio"`
-	MaximumLatencyMS    int        `json:"maximum_latency_ms"`
-	ExpectedNodes       int        `json:"expected_nodes"`
-	Version             uint64     `json:"version"`
-	LatestRevisionID    string     `json:"latest_revision_id,omitempty"`
-	LatestAssessmentID  string     `json:"latest_assessment_id,omitempty"`
-	CreatedAt           time.Time  `json:"created_at"`
-	ActivatedAt         *time.Time `json:"activated_at,omitempty"`
-	CompletedAt         *time.Time `json:"completed_at,omitempty"`
+	ID                  string    `json:"id"`
+	Zone                string    `json:"zone"`
+	State               PlanState `json:"state"`
+	MinimumSuccessRatio float64   `json:"minimum_success_ratio"`
+	MaximumLatencyMS    int       `json:"maximum_latency_ms"`
+	ExpectedNodes       int       `json:"expected_nodes"`
+	Version             uint64    `json:"version"`
+	LatestRevisionID    string    `json:"latest_revision_id,omitempty"`
+	LatestAssessmentID  string    `json:"latest_assessment_id,omitempty"`
+	// PolicyPackageID is set at plan creation time. When non-empty, every
+	// revision append and precheck is evaluated against the pinned package.
+	PolicyPackageID string `json:"policy_package_id,omitempty"`
+	// PolicyVersionID pins the exact immutable package version captured when
+	// the plan was created. Later package upgrades never reach this plan.
+	PolicyVersionID string     `json:"policy_version_id,omitempty"`
+	CreatedAt       time.Time  `json:"created_at"`
+	ActivatedAt     *time.Time `json:"activated_at,omitempty"`
+	CompletedAt     *time.Time `json:"completed_at,omitempty"`
 }
 
 type ResolverNode struct {
@@ -143,18 +153,20 @@ type AuditEvent struct {
 }
 
 type State struct {
-	SchemaVersion         int                          `json:"schema_version"`
-	Revision              uint64                       `json:"revision"`
-	Plans                 map[string]RolloutPlan       `json:"plans"`
-	Revisions             map[string]ZoneRevision      `json:"revisions"`
-	Nodes                 map[string]ResolverNode      `json:"nodes"`
-	Leases                map[string]NodeLease         `json:"leases"`
-	LeaseGroups           map[string]LeaseGroup        `json:"lease_groups"`
-	Probes                map[string]Probe             `json:"probes"`
-	Assessments           map[string]RolloutAssessment `json:"assessments"`
-	LeaseRequestKeys      map[string]string            `json:"lease_request_keys"`
-	AssessmentRequestKeys map[string]string            `json:"assessment_request_keys"`
-	AuditEvents           []AuditEvent                 `json:"audit_events"`
+	SchemaVersion         int                             `json:"schema_version"`
+	Revision              uint64                          `json:"revision"`
+	Plans                 map[string]RolloutPlan          `json:"plans"`
+	Revisions             map[string]ZoneRevision         `json:"revisions"`
+	Nodes                 map[string]ResolverNode         `json:"nodes"`
+	Leases                map[string]NodeLease            `json:"leases"`
+	LeaseGroups           map[string]LeaseGroup           `json:"lease_groups"`
+	Probes                map[string]Probe                `json:"probes"`
+	Assessments           map[string]RolloutAssessment    `json:"assessments"`
+	Policies              map[string]PolicyPackage        `json:"policies"`
+	PolicyVersions        map[string]PolicyPackageVersion `json:"policy_versions"`
+	LeaseRequestKeys      map[string]string               `json:"lease_request_keys"`
+	AssessmentRequestKeys map[string]string               `json:"assessment_request_keys"`
+	AuditEvents           []AuditEvent                    `json:"audit_events"`
 }
 
 type PageMeta struct {
